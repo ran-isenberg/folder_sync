@@ -59,6 +59,7 @@ class FolderSyncApp(rumps.App):
         self.stop_event = threading.Event()
         self._wake_event = threading.Event()  # wakes the sleep between syncs without stopping
         self._sync_start_time = None
+        self._sync_end_time = None
         self._initial_bytes_total = None
         self._next_sync_time = self._load_next_sync_time()
         self._rclone_proc = None  # track rclone subprocess for force-kill on quit
@@ -206,11 +207,11 @@ class FolderSyncApp(rumps.App):
         if is_paused:
             self.toggle_item.title = 'Resume Sync'
             self.toggle_item.set_callback(self.toggle_sync)
-        elif has_active_loop:
+        elif self.status == 'syncing':
             self.toggle_item.title = 'Pause Sync'
             self.toggle_item.set_callback(self.toggle_sync)
         else:
-            # No sync loop running and not paused — nothing to pause
+            # Not syncing — gray out pause
             self.toggle_item.title = 'Pause Sync'
             self.toggle_item.set_callback(None)
 
@@ -265,7 +266,11 @@ class FolderSyncApp(rumps.App):
                 self._initial_bytes_total = progress.bytes_total
             elif self._parse_bytes(progress.bytes_total) > self._parse_bytes(self._initial_bytes_total):
                 self._initial_bytes_total = progress.bytes_total
-        if progress.bytes_transferred and self._initial_bytes_total:
+        if progress.checks_total > 0 and progress.percent >= 100:
+            # Checksum-only run: transfers done, still checking files
+            check_pct = int(progress.checks_done / progress.checks_total * 100) if progress.checks_total else 0
+            self.progress_data_item.title = f'Checking: {progress.checks_done} / {progress.checks_total} files ({check_pct}%)'
+        elif progress.bytes_transferred and self._initial_bytes_total:
             self.progress_data_item.title = f'Data: {progress.bytes_transferred} / {self._initial_bytes_total} ({progress.percent}%)'
         # Calculate speed and ETA from total transferred / elapsed time
         elapsed = (datetime.now() - self._sync_start_time).total_seconds() if self._sync_start_time else 0
@@ -417,16 +422,16 @@ class FolderSyncApp(rumps.App):
         self.sync_thread.start()
 
     def _wait_until_next_sync(self, remaining: float) -> bool:
-        """Wait for `remaining` seconds, handling wake events (config changes).
+        """Wait for `remaining` seconds, handling wake events (config changes / wake from sleep).
         Returns True if we should sync, False if stopped."""
         self._wake_event.clear()
         while remaining > 0 and not self.stop_event.is_set():
             if self._wake_event.wait(timeout=remaining):
-                # Config changed — recalculate with new interval
+                # Recalculate: next sync = last sync end + new interval
                 self._wake_event.clear()
                 interval = self.config['interval_minutes'] * 60
-                elapsed = (datetime.now() - self._sync_start_time).total_seconds() if self._sync_start_time else 0
-                remaining = max(0, interval - elapsed)
+                since_last_sync = (datetime.now() - self._sync_end_time).total_seconds() if self._sync_end_time else interval
+                remaining = max(0, interval - since_last_sync)
                 self._save_next_sync_time(datetime.now() + timedelta(seconds=remaining))
                 self._mark_ui_dirty()
             else:
@@ -444,8 +449,7 @@ class FolderSyncApp(rumps.App):
         self._run_sync()
         while not self.stop_event.is_set():
             interval = self.config['interval_minutes'] * 60
-            sync_duration = (datetime.now() - self._sync_start_time).total_seconds() if self._sync_start_time else 0
-            remaining = max(0, interval - sync_duration)
+            remaining = interval  # full interval from sync end (we just finished)
             self._save_next_sync_time(datetime.now() + timedelta(seconds=remaining))
             self._mark_ui_dirty()
             if not self._wait_until_next_sync(remaining):
@@ -500,9 +504,12 @@ class FolderSyncApp(rumps.App):
                 if self.stop_event.wait(timeout=retry_delay):
                     break  # stopped during retry wait
 
+        self._sync_end_time = datetime.now()
         if result.success or result.error != 'Sync cancelled':
             add_history_entry(result)
         self._rebuild_history = True
+        # Wake the sync loop so it recalculates next_sync_time from this sync
+        self._wake_event.set()
         self._mark_ui_dirty()
 
     # ── Signal handling ────────────────────────────────────────────────
@@ -534,7 +541,13 @@ class FolderSyncApp(rumps.App):
     def sync_now(self, _):
         if self.status == 'syncing':
             return
-        threading.Thread(target=self._run_sync, daemon=True).start()
+        # Set next_sync_time to now so the sync loop treats it as overdue,
+        # then wake the loop. _poll_ui's wake-from-sleep check also catches this.
+        if self.sync_thread and self.sync_thread.is_alive():
+            self._save_next_sync_time(datetime.now())
+            self._wake_event.set()
+        else:
+            threading.Thread(target=self._run_sync, daemon=True).start()
 
     def _save_and_restart(self):
         save_config(self.config)
@@ -594,7 +607,13 @@ class FolderSyncApp(rumps.App):
     def open_log(self, _):
         log = os.path.expanduser('~/foldersync.log')
         if os.path.exists(log):
-            subprocess.Popen(['open', '-a', 'Console', log])
+            script = (
+                f'tell application "Terminal"\n'
+                f'  activate\n'
+                f'  do script "tail -n 80 -f {log}"\n'
+                f'end tell'
+            )
+            subprocess.Popen(['osascript', '-e', script])
         else:
             rumps.notification('FolderSync', 'No log yet', 'Run a sync first.', sound=False)
 

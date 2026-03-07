@@ -332,6 +332,7 @@ class TestNextSyncTimePersistence:
             app.sync_thread = None
             app._next_sync_time = None
             app._sync_start_time = None
+            app._sync_end_time = None
             app._rclone_proc = None
             app._initial_bytes_total = None
             app.title = ''
@@ -428,13 +429,13 @@ class TestNextSyncTimePersistence:
     def test_interval_change_updates_next_sync_time(self):
         """When interval changes and wake event fires, next sync time is recalculated."""
         app = self._make_app()
-        app._sync_start_time = datetime.now() - timedelta(minutes=2)
+        app._sync_end_time = datetime.now() - timedelta(minutes=2)
         with patch('app.save_config'):
             # Simulate: interval was 5 min, changed to 10 min
             app.config['interval_minutes'] = 10
             app._save_next_sync_time(datetime.now() + timedelta(minutes=8))
         assert app._next_sync_time is not None
-        # Next sync should be ~8 minutes from now (10 min interval - 2 min elapsed)
+        # Next sync should be ~8 minutes from now (10 min interval - 2 min since sync ended)
         delta = (app._next_sync_time - datetime.now()).total_seconds()
         assert 7 * 60 < delta < 9 * 60
 

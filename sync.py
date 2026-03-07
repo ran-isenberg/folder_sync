@@ -55,6 +55,9 @@ _RE_CURRENT_FILE = re.compile(r'^\s*\*\s+(?P<name>.+?):\s*(?P<detail>.+)$')
 # rclone -v INFO line: "2026/03/06 17:45:33 INFO  : file.txt: Copied (server-side copy)"
 _RE_INFO_FILE = re.compile(r'INFO\s*:\s*(?P<name>.+?):\s*(?P<detail>Copied|Moved|Deleted|Updated|Unchanged|Skipped)')
 
+# Checksum checking progress: "(chk#1179/7657)"
+_RE_CHECK_STATS = re.compile(r'\(chk#(?P<done>\d+)/(?P<total>\d+)\)')
+
 # Log prefix pattern: "2026/03/06 17:45:33 NOTICE: " or "2026/03/06 17:45:33 INFO  : "
 _RE_LOG_PREFIX = re.compile(r'^\d{4}/\d{2}/\d{2}\s+\d{2}:\d{2}:\d{2}\s+\w+\s*:\s*')
 
@@ -68,6 +71,8 @@ class SyncProgress:
     eta: str = ''
     files_done: int = 0
     files_total: int = 0
+    checks_done: int = 0
+    checks_total: int = 0
     current_file: str = ''
     current_file_detail: str = ''
 
@@ -97,6 +102,11 @@ def parse_stats_line(line: str, progress: SyncProgress) -> SyncProgress:
             progress.speed = m.group('speed')
         if m.group('eta'):
             progress.eta = m.group('eta')
+        # Check for checksum progress on the same line: (chk#1179/7657)
+        chk = _RE_CHECK_STATS.search(stripped)
+        if chk:
+            progress.checks_done = int(chk.group('done'))
+            progress.checks_total = int(chk.group('total'))
         return progress
 
     # Try file count stats
