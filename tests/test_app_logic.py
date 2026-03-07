@@ -495,6 +495,82 @@ class TestNextSyncTimePersistence:
         assert app._next_sync_time is None
         assert app.config['next_sync_time'] is None
 
+    def test_sync_now_sets_next_sync_time_to_now(self):
+        """sync_now should set next_sync_time to now and wake the sync loop."""
+        app = self._make_app()
+        mock_thread = MagicMock()
+        mock_thread.is_alive.return_value = True
+        app.sync_thread = mock_thread
+        app.status = 'idle'
+        app.config['enabled'] = True
+        app._wake_event = threading.Event()
+
+        with patch('app.save_config'):
+            app.sync_now(None)
+
+        assert app._next_sync_time is not None
+        # next_sync_time should be approximately now (within 2 seconds)
+        delta = abs((app._next_sync_time - datetime.now()).total_seconds())
+        assert delta < 2
+        assert app._wake_event.is_set()
+
+    def test_sync_now_ignored_when_syncing(self):
+        """sync_now should do nothing if already syncing."""
+        app = self._make_app()
+        app.status = 'syncing'
+        app._wake_event = threading.Event()
+        app.sync_thread = MagicMock()
+
+        app.sync_now(None)
+
+        assert not app._wake_event.is_set()
+
+    def test_sync_now_starts_thread_when_no_loop(self):
+        """sync_now should start a standalone thread if no sync loop is running."""
+        app = self._make_app()
+        app.status = 'idle'
+        app.sync_thread = None
+        app._wake_event = threading.Event()
+
+        with patch('threading.Thread') as mock_thread:
+            mock_instance = MagicMock()
+            mock_thread.return_value = mock_instance
+            app.sync_now(None)
+            mock_thread.assert_called_once()
+            mock_instance.start.assert_called_once()
+
+    def test_sync_now_enabled_in_menu_when_idle_with_loop(self):
+        """Sync Now should be clickable when idle with an active sync loop."""
+        app = self._make_app()
+        mock_thread = MagicMock()
+        mock_thread.is_alive.return_value = True
+        app.sync_thread = mock_thread
+        app.config['enabled'] = True
+        app.status = 'idle'
+        app.update_menu()
+        app.sync_now_item.set_callback.assert_called_with(app.sync_now)
+
+    def test_sync_now_disabled_in_menu_when_syncing(self):
+        """Sync Now should be grayed out when a sync is in progress."""
+        app = self._make_app()
+        mock_thread = MagicMock()
+        mock_thread.is_alive.return_value = True
+        app.sync_thread = mock_thread
+        app.config['enabled'] = True
+        app.status = 'syncing'
+        app.update_menu()
+        app.sync_now_item.set_callback.assert_called_with(None)
+
+    def test_wait_until_next_sync_respects_sync_now(self):
+        """_wait_until_next_sync should return immediately when next_sync_time is in the past."""
+        app = self._make_app()
+        app._next_sync_time = datetime.now() - timedelta(seconds=1)
+        app._wake_event = threading.Event()
+
+        result = app._wait_until_next_sync(300)
+
+        assert result is True  # should sync (not stopped)
+
     def test_next_sync_time_survives_app_restart(self, tmp_path):
         """Full restart scenario: save time, reload config, verify time is there."""
         from sync import load_config, save_config

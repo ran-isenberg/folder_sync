@@ -6,7 +6,20 @@ from datetime import datetime, timedelta
 
 import objc
 import rumps
-from AppKit import NSURL, NSOpenPanel
+from AppKit import (
+    NSApp,
+    NSBackingStoreBuffered,
+    NSBezelStyleRounded,
+    NSButton,
+    NSClosableWindowMask,
+    NSFont,
+    NSMakeRect,
+    NSOpenPanel,
+    NSTextField,
+    NSTitledWindowMask,
+    NSURL,
+    NSWindow,
+)
 
 from sync import (
     APP_AUTHOR,
@@ -45,6 +58,151 @@ def _pick_folder(title: str, start_path: str | None = None) -> str | None:
     if panel.runModal() == objc.YES:
         return str(panel.URL().path())
     return None
+
+
+def _create_config_delegate_class():
+    """Create an ObjC class to handle button actions in the config window."""
+
+    class ConfigDelegate(objc.lookUpClass('NSObject')):
+        config_window = objc.ivar('config_window')
+
+        @objc.python_method
+        def initWithConfigWindow_(self, cw):
+            self = objc.super(ConfigDelegate, self).init()
+            if self is None:
+                return None
+            self._cw = cw
+            return self
+
+        def browseSource_(self, sender):
+            self._cw._browse_source()
+
+        def browseDest_(self, sender):
+            self._cw._browse_dest()
+
+        def save_(self, sender):
+            self._cw.save()
+
+        def cancel_(self, sender):
+            self._cw.cancel()
+
+    return ConfigDelegate
+
+
+_ConfigDelegate = _create_config_delegate_class()
+
+
+class _ConfigWindow:
+    """Native macOS preferences window for FolderSync configuration."""
+
+    WIDTH = 500
+    HEIGHT = 280
+
+    def __init__(self, app):
+        self.app = app
+        self._delegate = _ConfigDelegate.alloc().initWithConfigWindow_(self)
+        self._build_window()
+        self.window.makeKeyAndOrderFront_(None)
+        NSApp.activateIgnoringOtherApps_(True)
+
+    def _build_window(self):
+        self.window = NSWindow.alloc().initWithContentRect_styleMask_backing_defer_(
+            NSMakeRect(0, 0, self.WIDTH, self.HEIGHT),
+            NSTitledWindowMask | NSClosableWindowMask,
+            NSBackingStoreBuffered,
+            False,
+        )
+        self.window.setTitle_('FolderSync — Configure')
+        self.window.center()
+
+        content = self.window.contentView()
+        y = self.HEIGHT - 50
+        label_font = NSFont.boldSystemFontOfSize_(13)
+
+        # Source
+        self._add_label(content, 'Source Folder:', 20, y, label_font)
+        self.source_field = self._add_text_field(content, self.app.config['source'], 140, y, 240)
+        self._add_button(content, 'Browse...', 390, y - 2, 'browseSource:')
+        y -= 40
+
+        # Destination
+        self._add_label(content, 'Destination:', 20, y, label_font)
+        self.dest_field = self._add_text_field(content, self.app.config['destination'], 140, y, 240)
+        self._add_button(content, 'Browse...', 390, y - 2, 'browseDest:')
+        y -= 40
+
+        # Interval
+        self._add_label(content, 'Sync Interval:', 20, y, label_font)
+        self.interval_field = self._add_text_field(content, str(self.app.config['interval_minutes']), 140, y, 60)
+        self._add_label(content, 'minutes', 208, y, NSFont.systemFontOfSize_(13))
+        y -= 40
+
+        # Autostart
+        self._add_label(content, 'Start on Login:', 20, y, label_font)
+        self.autostart_switch = NSButton.alloc().initWithFrame_(NSMakeRect(140, y - 2, 100, 24))
+        self.autostart_switch.setButtonType_(3)  # NSSwitchButton
+        self.autostart_switch.setTitle_('')
+        self.autostart_switch.setState_(1 if is_launchd_installed() else 0)
+        content.addSubview_(self.autostart_switch)
+        y -= 50
+
+        # Save / Cancel buttons
+        self._add_button(content, 'Cancel', self.WIDTH - 200, y, 'cancel:')
+        save_btn = self._add_button(content, 'Save', self.WIDTH - 100, y, 'save:')
+        save_btn.setKeyEquivalent_('\r')
+
+    def _add_label(self, parent, text, x, y, font):
+        label = NSTextField.labelWithString_(text)
+        label.setFrame_(NSMakeRect(x, y, 120, 20))
+        label.setFont_(font)
+        parent.addSubview_(label)
+        return label
+
+    def _add_text_field(self, parent, value, x, y, width):
+        field = NSTextField.alloc().initWithFrame_(NSMakeRect(x, y - 2, width, 24))
+        field.setStringValue_(value)
+        field.setFont_(NSFont.systemFontOfSize_(13))
+        parent.addSubview_(field)
+        return field
+
+    def _add_button(self, parent, title, x, y, action_sel):
+        btn = NSButton.alloc().initWithFrame_(NSMakeRect(x, y, 90, 30))
+        btn.setTitle_(title)
+        btn.setBezelStyle_(NSBezelStyleRounded)
+        btn.setTarget_(self._delegate)
+        btn.setAction_(action_sel)
+        parent.addSubview_(btn)
+        return btn
+
+    def _browse_source(self):
+        chosen = _pick_folder('Select Source Folder (Google Drive)', str(self.source_field.stringValue()))
+        if chosen:
+            self.source_field.setStringValue_(chosen)
+
+    def _browse_dest(self):
+        chosen = _pick_folder('Select Destination Folder (NAS)', str(self.dest_field.stringValue()))
+        if chosen:
+            self.dest_field.setStringValue_(chosen)
+
+    def cancel(self):
+        self.window.close()
+        self.app._config_window = None
+
+    def save(self):
+        source = str(self.source_field.stringValue()).strip()
+        destination = str(self.dest_field.stringValue()).strip()
+        try:
+            interval = int(str(self.interval_field.stringValue()).strip())
+            if interval < 1:
+                rumps.notification('FolderSync', 'Error', 'Interval must be at least 1 minute.', sound=False)
+                return
+        except ValueError:
+            rumps.notification('FolderSync', 'Error', 'Please enter a valid number for interval.', sound=False)
+            return
+        autostart = bool(self.autostart_switch.state())
+        self.window.close()
+        self.app._config_window = None
+        self.app._apply_config(source, destination, interval, autostart)
 
 
 class FolderSyncApp(rumps.App):
@@ -92,17 +250,7 @@ class FolderSyncApp(rumps.App):
         self.history_menu = rumps.MenuItem('Recent Syncs')
         self._rebuild_history_menu()
 
-        # Configure submenu
-        self.configure_menu = rumps.MenuItem('Configure')
-        self.source_item = rumps.MenuItem(f'Source: {self.config["source"]}', callback=self.set_source)
-        self.dest_item = rumps.MenuItem(f'Destination: {self.config["destination"]}', callback=self.set_destination)
-        self.interval_item = rumps.MenuItem(f'Interval: {self.config["interval_minutes"]} min', callback=self.set_interval)
-        self.autostart_item = rumps.MenuItem('Start on Login', callback=self.toggle_autostart)
-        self.autostart_item.state = is_launchd_installed()
-        self.configure_menu[self.source_item.title] = self.source_item
-        self.configure_menu[self.dest_item.title] = self.dest_item
-        self.configure_menu[self.interval_item.title] = self.interval_item
-        self.configure_menu[self.autostart_item.title] = self.autostart_item
+        self.configure_item = rumps.MenuItem('Configure...', callback=self.open_configure)
 
         self.open_log_item = rumps.MenuItem('View Log', callback=self.open_log)
         self.about_menu = rumps.MenuItem('About')
@@ -138,7 +286,7 @@ class FolderSyncApp(rumps.App):
             self.toggle_item,
             None,
             self.history_menu,
-            self.configure_menu,
+            self.configure_item,
             self.open_log_item,
             self.about_menu,
             None,
@@ -162,13 +310,14 @@ class FolderSyncApp(rumps.App):
     # ── Icon & menu updates ───────────────────────────────────────────
 
     def update_icon(self):
+        # Use text symbols that render as black in the menu bar (template-style)
         icons = {
-            'idle': '☁️',
-            'syncing': '🔄',
-            'error': '⚠️',
-            'paused': '⏸️',
+            'idle': '⇅',
+            'syncing': '↻',
+            'error': '⚠',
+            'paused': '❙❙',
         }
-        self.title = icons.get(self.status, '☁️')
+        self.title = icons.get(self.status, '⇅')
 
     def update_menu(self):
         status_labels = {
@@ -360,7 +509,7 @@ class FolderSyncApp(rumps.App):
         if raw:
             try:
                 return datetime.fromisoformat(raw)
-            except ValueError, TypeError:
+            except (ValueError, TypeError):
                 pass
         return None
 
@@ -391,18 +540,25 @@ class FolderSyncApp(rumps.App):
         self.sync_thread.start()
 
     def _wait_until_next_sync(self, remaining: float) -> bool:
-        """Wait for `remaining` seconds, handling wake events (config changes / wake from sleep).
+        """Wait for `remaining` seconds, handling wake events (config changes / sync now).
         Returns True if we should sync, False if stopped."""
         self._wake_event.clear()
+        # Check if next_sync_time already passed (e.g. sync_now called before we entered wait)
+        if self._next_sync_time and self._next_sync_time <= datetime.now():
+            return not self.stop_event.is_set()
         while remaining > 0 and not self.stop_event.is_set():
             if self._wake_event.wait(timeout=remaining):
-                # Recalculate: next sync = last sync end + new interval
                 self._wake_event.clear()
-                interval = self.config['interval_minutes'] * 60
-                since_last_sync = (datetime.now() - self._sync_end_time).total_seconds() if self._sync_end_time else interval
-                remaining = max(0, interval - since_last_sync)
-                self._save_next_sync_time(datetime.now() + timedelta(seconds=remaining))
-                self._mark_ui_dirty()
+                # Check if next_sync_time is now or in the past (sync_now or wake from sleep)
+                if self._next_sync_time and self._next_sync_time <= datetime.now():
+                    remaining = 0
+                else:
+                    # Config changed — recalculate from last sync end + new interval
+                    interval = self.config['interval_minutes'] * 60
+                    since_last_sync = (datetime.now() - self._sync_end_time).total_seconds() if self._sync_end_time else interval
+                    remaining = max(0, interval - since_last_sync)
+                    self._save_next_sync_time(datetime.now() + timedelta(seconds=remaining))
+                    self._mark_ui_dirty()
             else:
                 break  # timeout expired — time to sync
         return not self.stop_event.is_set()
@@ -528,65 +684,46 @@ class FolderSyncApp(rumps.App):
         else:
             threading.Thread(target=self._run_sync, daemon=True).start()
 
-    def _save_and_restart(self):
-        save_config(self.config)
-        self._update_config_menu()
-        self._wake_event.set()  # wake sync loop to recalculate next sync time
-        rumps.notification('FolderSync', 'Config saved', 'Settings updated.', sound=False)
+    def open_configure(self, _):
+        """Open the native preferences window."""
+        if hasattr(self, '_config_window') and self._config_window is not None:
+            self._config_window.window.makeKeyAndOrderFront_(None)
+            NSApp.activateIgnoringOtherApps_(True)
+            return
+        self._config_window = _ConfigWindow(self)
 
-    def _update_config_menu(self):
-        self.source_item.title = f'Source: {self.config["source"]}'
-        self.dest_item.title = f'Destination: {self.config["destination"]}'
-        self.interval_item.title = f'Interval: {self.config["interval_minutes"]} min'
-
-    def set_source(self, _):
-        chosen = _pick_folder('Select Source Folder (Google Drive)', self.config['source'])
-        if chosen:
-            self.config['source'] = chosen
-            self._save_and_restart()
-
-    def set_destination(self, _):
-        chosen = _pick_folder('Select Destination Folder (NAS)', self.config['destination'])
-        if chosen:
-            self.config['destination'] = chosen
-            self._save_and_restart()
-
-    def set_interval(self, _):
-        w = rumps.Window(
-            title='Sync Interval',
-            message='Enter sync interval in minutes:',
-            default_text=str(self.config['interval_minutes']),
-            ok='Save',
-            cancel='Cancel',
-            dimensions=(420, 24),
-        )
-        response = w.run()
-        if response.clicked and response.text.strip():
-            try:
-                minutes = int(response.text.strip())
-                if minutes < 1:
-                    rumps.notification('FolderSync', 'Error', 'Interval must be at least 1 minute.', sound=False)
-                    return
-                self.config['interval_minutes'] = minutes
-                self._save_and_restart()
-            except ValueError:
-                rumps.notification('FolderSync', 'Error', 'Please enter a valid number.', sound=False)
-
-    def toggle_autostart(self, _):
-        if is_launchd_installed():
+    def _apply_config(self, source, destination, interval_minutes, autostart):
+        """Called by the config window when Save is clicked."""
+        changed = False
+        if source != self.config['source']:
+            self.config['source'] = source
+            changed = True
+        if destination != self.config['destination']:
+            self.config['destination'] = destination
+            changed = True
+        if interval_minutes != self.config['interval_minutes']:
+            self.config['interval_minutes'] = interval_minutes
+            changed = True
+        if changed:
+            save_config(self.config)
+            self._wake_event.set()
+            rumps.notification('FolderSync', 'Config saved', 'Settings updated.', sound=False)
+        # Handle autostart toggle
+        currently_installed = is_launchd_installed()
+        if autostart and not currently_installed:
+            if install_launchd_plist():
+                rumps.notification('FolderSync', 'Auto-start enabled', 'App will start automatically on login.', sound=False)
+            else:
+                rumps.notification('FolderSync', 'Error', 'App not found in /Applications. Install first.', sound=False)
+        elif not autostart and currently_installed:
             uninstall_launchd_plist()
-            self.autostart_item.state = False
             rumps.notification('FolderSync', 'Auto-start disabled', 'App will no longer start on login.', sound=False)
-        elif install_launchd_plist():
-            self.autostart_item.state = True
-            rumps.notification('FolderSync', 'Auto-start enabled', 'App will start automatically on login.', sound=False)
-        else:
-            rumps.notification('FolderSync', 'Error', 'App not found in /Applications. Install first.', sound=False)
 
     def open_log(self, _):
         log = os.path.expanduser('~/foldersync.log')
         if os.path.exists(log):
-            script = f'tell application "Terminal"\n  activate\n  do script "tail -n 80 -f {log}"\nend tell'
+            escaped_log = log.replace('\\', '\\\\').replace('"', '\\"').replace("'", "\\'")
+            script = f'tell application "Terminal"\n  activate\n  do script "tail -n 80 -f \'{escaped_log}\'"\nend tell'
             subprocess.Popen(['osascript', '-e', script])
         else:
             rumps.notification('FolderSync', 'No log yet', 'Run a sync first.', sound=False)

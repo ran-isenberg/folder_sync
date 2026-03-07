@@ -424,7 +424,6 @@ def run_sync_live(
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         if on_start:
             on_start(proc)
-        log_fh = open(log_file, 'a')  # noqa: SIM115
 
         # Start a watcher thread that kills rclone when stop_event fires
         if stop_event:
@@ -432,15 +431,17 @@ def run_sync_live(
             watcher.start()
 
         # Read stderr for progress (rclone -v writes stats + info to stderr)
-        for line in proc.stderr:
-            log_fh.write(line)
-            log_fh.flush()
-            parse_stats_line(line.strip(), progress)
-            if on_progress:
-                on_progress(progress)
+        stderr_lines: list[str] = []
+        with open(log_file, 'a') as log_fh:
+            for line in proc.stderr:
+                log_fh.write(line)
+                log_fh.flush()
+                stderr_lines.append(line)
+                parse_stats_line(line.strip(), progress)
+                if on_progress:
+                    on_progress(progress)
 
         proc.wait()
-        log_fh.close()
 
         cancelled = stop_event and stop_event.is_set()
         duration = int((datetime.now() - start_time).total_seconds())
@@ -462,8 +463,8 @@ def run_sync_live(
                 duration_seconds=duration,
             )
         else:
-            remaining_stderr = proc.stderr.read()
-            last_line = remaining_stderr.strip().split('\n')[-1][:80] if remaining_stderr.strip() else 'rclone error'
+            all_stderr = ''.join(stderr_lines)
+            last_line = all_stderr.strip().split('\n')[-1][:80] if all_stderr.strip() else 'rclone error'
             return SyncResult(
                 timestamp=datetime.now().strftime('%b %d, %H:%M'),
                 success=False,

@@ -2,7 +2,6 @@
 build/
 dist/
 *.spec.bak
-*.icns
 
 # Python
 __pycache__/
@@ -27,5 +26,3 @@ uv.lock
 # DMG output
 *.dmg
 
-# Iconset (generated during build)
-icon.iconset/

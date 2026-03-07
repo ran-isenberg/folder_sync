@@ -44,21 +44,11 @@ echo "📦  Installing Python packages with uv..."
 uv sync
 
 
-# ── 7. Generate app icon ─────────────────────────────────────────────
-echo ""
-echo "🎨  Generating app icon..."
-
-ICON_DIR="icon.iconset"
-mkdir -p "$ICON_DIR"
-
-uv run python generate_icon.py
-
-rm -rf "$ICON_DIR"
-
+# ── 7. Check app icon ────────────────────────────────────────────────
 if [ -f "FolderSync.icns" ]; then
-  echo "✅  Icon generated"
+  echo "✅  Icon found"
 else
-  echo "⚠️  Icon generation failed — build will use default icon"
+  echo "⚠️  FolderSync.icns not found — build will use default icon"
 fi
 
 # ── 8. Stamp build info and build the .app ───────────────────────────
